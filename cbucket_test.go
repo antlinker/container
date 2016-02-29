@@ -3,6 +3,7 @@ package container_test
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/antlinker/container"
@@ -146,6 +147,45 @@ var _ = Describe("按数量时间弹出桶的容器功能测试", func() {
 		Ω(buckets.Len()).Should(Equal(0))
 	})
 
+	It("插入顺序弹出顺序一致性测试", func() {
+
+		insertnum := int64(1000)
+		buckets := CreateNTCBuckets(buckets_popnum, buckets_timeout, buckets_slicenum)
+		bucketchan, _ := buckets.Open()
+		wg := &sync.WaitGroup{}
+		var value int64 = -1
+		wg.Add(1)
+		go func(bucketchan <-chan CBucket) {
+			defer GinkgoRecover()
+			defer wg.Done()
+			var sum int64 = 0
+			var preelem int64 = -1
+			for bucket := range bucketchan {
+				//fmt.Println("弹出桶:", bucket.Len())
+				for bucket.Len() > 0 {
+					elem, err := bucket.Pop()
+					if err != nil {
+						break
+					}
+					//Ω(elem).Should(BeNumerically("<", insertnum))
+					sum += elem.(int64)
+					Ω(elem.(int64)).To(BeNumerically(">", preelem))
+					preelem = elem.(int64)
+				}
+
+			}
+			Ω(sum).Should(Equal(insertnum * (insertnum - 1) / 2))
+		}(bucketchan)
+
+		for i := int64(0); i < insertnum; i++ {
+			buckets.Push(atomic.AddInt64(&value, 1))
+		}
+		buckets.Close()
+
+		wg.Wait()
+		Ω(buckets.Len()).Should(Equal(0))
+	})
+
 })
 var _ = Describe("按数量时间弹出桶的容器功能测试", func() {
 	var (
@@ -168,24 +208,22 @@ var _ = Describe("按数量时间弹出桶的容器功能测试", func() {
 			//			defer GinkgoRecover()
 			defer wg.Done()
 
-			var sum int64 = 0
+			var sum int = 0
 			for bucket := range bucketchan {
-				if bucket == nil {
-					break
-				}
-				//fmt.Println("弹出桶:", bucket.Len())
-				for bucket.Len() > 0 {
+				sum += bucket.Len()
+				// //fmt.Println("弹出桶:", bucket.Len())
+				// for bucket.Len() > 0 {
 
-					elem, err := bucket.Pop()
-					if err != nil {
-						break
-					}
-					//Ω(elem).Should(BeNumerically("<", insertnum))
-					sum += elem.(int64)
-				}
+				// 	elem, err := bucket.Pop()
+				// 	if err != nil {
+				// 		break
+				// 	}
+				// 	//Ω(elem).Should(BeNumerically("<", insertnum))
+				// 	sum += elem.(int64)
+				// }
 
 			}
-			Ω(sum).Should(Equal(100 * insertnum * (insertnum - 1) / 2))
+			Ω(sum).Should(BeNumerically("==", gonum*insertnum))
 		}(bucketchan)
 		starttime = time.Now()
 	})
@@ -207,7 +245,7 @@ var _ = Describe("按数量时间弹出桶的容器功能测试", func() {
 			}
 
 		})
-		Ω(runtime.Seconds()).Should(BeNumerically("<", 0.4), "SomethingHard() shouldn't take too long.")
+		Ω(runtime.Seconds()).Should(BeNumerically("<", 4), "SomethingHard() shouldn't take too long.")
 
 	}, int(gonum))
 })

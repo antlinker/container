@@ -2,6 +2,7 @@ package container
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,7 @@ func (b *NTCBuckets) Open() (<-chan CBucket, error) {
 				}
 				for b.popCheck() {
 					b.popBucket()
+					runtime.Gosched()
 				}
 
 			}
@@ -128,7 +130,8 @@ type NTCBucket struct {
 	size     int
 	slicenum int
 	blists   []*CBucketList
-	poplock  sync.RWMutex
+	popind   int
+	poplock  sync.Mutex
 }
 
 func (b *NTCBucket) init(slicenum int) {
@@ -145,25 +148,31 @@ func (b *NTCBucket) reset() {
 	}
 }
 func (b *NTCBucket) push(ele interface{}) error {
-	b.poplock.Lock()
 	b.size++
 	var wslice = (b.size - 1) % b.slicenum
 	b.blists[wslice].push(ele)
-	b.poplock.Unlock()
 	return nil
 }
 func (b *NTCBucket) Pop() (interface{}, error) {
 	b.poplock.Lock()
+	defer b.poplock.Unlock()
 	if b.size == 0 {
-		b.poplock.Unlock()
 		return nil, emptyError
 	}
 	b.size--
-	ele := b.blists[0].pop()
-	if b.blists[0].isempty() && len(b.blists) > 1 {
-		b.blists = b.blists[1:]
+	ele := b.blists[b.popind].pop()
+	if b.popind >= b.slicenum-1 {
+		b.popind = 0
+	} else {
+		b.popind++
 	}
-	b.poplock.Unlock()
+	// if !atomic.CompareAndSwapInt32(&b.popind, int32(b.slicenum-1), 0) {
+	// 	b.popind++
+	// }
+
+	// if b.blists[0].isempty() && len(b.blists) > 1 {
+	// 	b.blists = b.blists[1:]
+	// }
 	return ele, nil
 }
 func (b *NTCBucket) Len() int {
@@ -171,21 +180,19 @@ func (b *NTCBucket) Len() int {
 }
 
 func (b *NTCBucket) ToSlice() ([]interface{}, error) {
-	outlist := createCBucketList()
 	var slicenum = b.slicenum
-	for i := 0; i < slicenum; i++ {
-		outlist.join(b.blists[i])
-	}
 
 	out := make([]interface{}, 0, b.size)
+
 	for {
-		elem := outlist.pop()
-		if elem == nil {
-			break
+		for i := 0; i < slicenum; i++ {
+			elem := b.blists[i].pop()
+			if elem == nil {
+				return out, nil
+			}
+			out = append(out, elem)
 		}
-		out = append(out, elem)
 	}
-	return out, nil
 }
 
 type CBucketNode struct {
