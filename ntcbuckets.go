@@ -8,17 +8,20 @@ import (
 	"time"
 )
 
-func CreateNTCBuckets(num int, timeout time.Duration, slicenum int) *NTCBuckets {
-	bs := &NTCBuckets{popnum: num, timeout: timeout, curCBucket: createNTCBucket(slicenum)}
+// CreateNTCBuckets 创建一个桶管理容器
+// 当容器内有num个数据或则到达timeout超时时间容器内数据不为空则弹出一个桶（桶内包含多个元素）
+// slicenum内部桶数量
+func CreateNTCBuckets(num int, timeout time.Duration, slicenum int) CBuckets {
+	bs := &ntcBuckets{popnum: num, timeout: timeout, curCBucket: createNTCBucket(slicenum)}
 	return bs
 }
 
-type NTCBuckets struct {
+type ntcBuckets struct {
 	bchan      chan CBucket
 	run        bool
 	closelock  sync.Mutex
 	size       int64
-	curCBucket *NTCBucket
+	curCBucket *ntcBucket
 	poplock    sync.RWMutex
 
 	popnum  int
@@ -29,10 +32,12 @@ type NTCBuckets struct {
 	pushCond *sync.Cond
 }
 
-var CloseError error = errors.New("已经关闭")
-var emptyError error = errors.New("已经为空")
+// ErrClose 容器已经关闭
+var ErrClose = errors.New("已经关闭")
 
-func (b *NTCBuckets) popBucket() {
+var errEmpty = errors.New("已经为空")
+
+func (b *ntcBuckets) popBucket() {
 	//fmt.Println("弹出桶:start")
 	b.poplock.Lock()
 	b.size = 0
@@ -44,10 +49,10 @@ func (b *NTCBuckets) popBucket() {
 	b.bchan <- popbucket
 	//fmt.Println("弹出桶完成:", popbucket)
 }
-func (b *NTCBuckets) popCheck() bool {
+func (b *ntcBuckets) popCheck() bool {
 	return int(b.size) >= b.popnum
 }
-func (b *NTCBuckets) Close() {
+func (b *ntcBuckets) Close() {
 	b.closelock.Lock()
 	defer b.closelock.Unlock()
 	if !b.run {
@@ -56,7 +61,7 @@ func (b *NTCBuckets) Close() {
 	b.run = false
 	b.pushCond.Signal()
 }
-func (b *NTCBuckets) Open() (<-chan CBucket, error) {
+func (b *ntcBuckets) Open() (<-chan CBucket, error) {
 	b.curCBucket.reset()
 	b.bchan = make(chan CBucket)
 	b.pushSign = make(chan bool, 16)
@@ -100,10 +105,10 @@ func (b *NTCBuckets) Open() (<-chan CBucket, error) {
 	b.run = true
 	return b.bchan, nil
 }
-func (b *NTCBuckets) Push(ele interface{}) error {
+func (b *ntcBuckets) Push(ele interface{}) error {
 	b.closelock.Lock()
 	if !b.run {
-		return CloseError
+		return ErrClose
 	}
 	b.poplock.RLock()
 	b.curCBucket.push(ele)
@@ -116,48 +121,48 @@ func (b *NTCBuckets) Push(ele interface{}) error {
 	return nil
 }
 
-func (b *NTCBuckets) Len() int {
+func (b *ntcBuckets) Len() int {
 	return int(b.size)
 }
 
-func createNTCBucket(slicenum int) *NTCBucket {
-	b := new(NTCBucket)
+func createNTCBucket(slicenum int) *ntcBucket {
+	b := new(ntcBucket)
 	b.init(slicenum)
 	return b
 }
 
-type NTCBucket struct {
+type ntcBucket struct {
 	size     int
 	slicenum int
-	blists   []*CBucketList
+	blists   []*cBucketList
 	popind   int
 	poplock  sync.Mutex
 }
 
-func (b *NTCBucket) init(slicenum int) {
+func (b *ntcBucket) init(slicenum int) {
 	b.slicenum = slicenum
-	b.blists = make([]*CBucketList, slicenum)
+	b.blists = make([]*cBucketList, slicenum)
 	for i := 0; i < slicenum; i++ {
 		b.blists[i] = createCBucketList()
 	}
 }
-func (b *NTCBucket) reset() {
+func (b *ntcBucket) reset() {
 	var slicenum = b.slicenum
 	for i := 0; i < slicenum; i++ {
 		b.blists[i] = createCBucketList()
 	}
 }
-func (b *NTCBucket) push(ele interface{}) error {
+func (b *ntcBucket) push(ele interface{}) error {
 	b.size++
 	var wslice = (b.size - 1) % b.slicenum
 	b.blists[wslice].push(ele)
 	return nil
 }
-func (b *NTCBucket) Pop() (interface{}, error) {
+func (b *ntcBucket) Pop() (interface{}, error) {
 	b.poplock.Lock()
 	defer b.poplock.Unlock()
 	if b.size == 0 {
-		return nil, emptyError
+		return nil, errEmpty
 	}
 	b.size--
 	ele := b.blists[b.popind].pop()
@@ -175,11 +180,11 @@ func (b *NTCBucket) Pop() (interface{}, error) {
 	// }
 	return ele, nil
 }
-func (b *NTCBucket) Len() int {
+func (b *ntcBucket) Len() int {
 	return b.size
 }
 
-func (b *NTCBucket) ToSlice() ([]interface{}, error) {
+func (b *ntcBucket) ToSlice() ([]interface{}, error) {
 	var slicenum = b.slicenum
 
 	out := make([]interface{}, 0, b.size)
@@ -195,53 +200,53 @@ func (b *NTCBucket) ToSlice() ([]interface{}, error) {
 	}
 }
 
-type CBucketNode struct {
+type cBucketNode struct {
 	value interface{}
-	next  *CBucketNode
+	next  *cBucketNode
 }
 
-func (n *CBucketNode) insertNext(ele interface{}) *CBucketNode {
-	node := new(CBucketNode)
+func (n *cBucketNode) insertNext(ele interface{}) *cBucketNode {
+	node := new(cBucketNode)
 	node.value = ele
 	n.next = node
 	return node
 }
 
-func createCBucketList() *CBucketList {
-	list := new(CBucketList)
+func createCBucketList() *cBucketList {
+	list := new(cBucketList)
 	list.cur = &list.root
 	return list
 }
 
-type CBucketList struct {
-	root CBucketNode
+type cBucketList struct {
+	root cBucketNode
 
-	cur *CBucketNode
+	cur *cBucketNode
 
 	sync.RWMutex
 }
 
-func (l *CBucketList) isempty() bool {
+func (l *cBucketList) isempty() bool {
 	return l.root.next == nil
 }
-func (l *CBucketList) clear() {
+func (l *cBucketList) clear() {
 	l.Lock()
 	l.cur = &l.root
 	l.root.next = nil
 	l.Unlock()
 }
-func (l *CBucketList) join(list *CBucketList) {
+func (l *cBucketList) join(list *cBucketList) {
 	l.Lock()
 	l.cur.next = list.root.next
 	l.cur = list.cur
 	l.Unlock()
 }
-func (l *CBucketList) push(ele interface{}) {
+func (l *cBucketList) push(ele interface{}) {
 	l.Lock()
 	l.cur = l.cur.insertNext(ele)
 	l.Unlock()
 }
-func (l *CBucketList) pop() (ele interface{}) {
+func (l *cBucketList) pop() (ele interface{}) {
 	l.Lock()
 	//l.cur.
 	if l.root.next == nil {
